@@ -328,5 +328,3 @@ client.on('messageCreate', async message => {
         return message.reply(`You claimed your **daily reward** of **${dailyRewardAmount} points**!`);
     }
 });
-
-
