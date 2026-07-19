@@ -11,7 +11,8 @@ const {
 const fs = require('fs');
 
 // ====== CONFIG ======
-const BOT_TOKEN = "MTUyODMwMjk1MjAxNDU0OTA1Mg.GtYIn5.AGN70OaV7pADq0htRX39JfeNlE3FkmrzcSxWdQ";
+const BOT_TOKEN = process.env.TOKEN;
+client.login(BOT_TOKEN);
 const CLIENT_ID = "1528302952014549052"; // your app ID
 const POINTS_FILE = './points.json';
 const PREFIX = '!';
