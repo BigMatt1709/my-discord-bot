@@ -149,10 +149,6 @@ claimedByMessage.set(msg.id, new Set());
 setTimeout(() => {
     msg.delete().catch(() => {});
 }, 10 * 60 * 1000);
-
-});
-
-
     // Button clicks
     if (interaction.isButton()) {
         const msgId = interaction.message.id;
