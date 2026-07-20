@@ -226,7 +226,6 @@ if (claimedSet.callerName === undefined) {
             ephemeral: true
         });
     }
-});
 
 // ====== MESSAGE COMMANDS (PREFIX !) ======
 client.on('messageCreate', async message => {
