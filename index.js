@@ -140,10 +140,6 @@ const row = new ActionRowBuilder().addComponents(
         .setLabel('I Called')
         .setStyle(ButtonStyle.Primary)
 );
-    return interaction.reply({
-        content: "Only staff or the server owner can start giveaways.",
-        ephemeral: true
-    });
 
 // ====== INTERACTIONS ======
 client.on('interactionCreate', async interaction => {
