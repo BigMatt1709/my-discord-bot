@@ -9,6 +9,8 @@ const {
     ButtonStyle
 } = require('discord.js');
 const fs = require('fs');
+const http = require('http');
+
 // ====== COOLDOWN MAP ======
 const cooldowns = new Map();
 let whoJoinedCooldown = 0; // timestamp of last use
@@ -35,6 +37,13 @@ function addPoints(userId, amount) {
     savePoints();
 }
 
+function removePoints(userId, amount) {
+    if (!points[userId]) points[userId] = { balance: 0 };
+    points[userId].balance -= amount;
+    if (points[userId].balance < 0) points[userId].balance = 0;
+    savePoints();
+}
+
 function getPoints(userId) {
     if (!points[userId]) return 0;
     return points[userId].balance;
@@ -42,7 +51,7 @@ function getPoints(userId) {
 
 // ====== TRACK BUTTON CLICKS PER MESSAGE ======
 const claimedByMessage = new Map(); 
-// key: messageId, value: Set of userIds
+// key: messageId, value: Set of userIds + flags
 
 // ====== CLIENT ======
 const client = new Client({
@@ -53,16 +62,61 @@ const client = new Client({
     ]
 });
 
+// ====== GIVEAWAY SYSTEM ======
+client.giveaway = {
+    active: false,
+    entries: {},
+    timeout: null
+};
+
+function endGiveaway(interactionOrMessage) {
+    const g = client.giveaway;
+
+    if (!g || !g.active) {
+        return interactionOrMessage.reply("No giveaway is active.");
+    }
+
+    g.active = false;
+    clearTimeout(g.timeout);
+
+    const entries = Object.entries(g.entries);
+
+    if (entries.length === 0) {
+        return interactionOrMessage.reply("Giveaway ended — no entries.");
+    }
+
+    const weighted = [];
+    entries.forEach(([userId, amount]) => {
+        for (let i = 0; i < amount; i++) weighted.push(userId);
+    });
+
+    const winner = weighted[Math.floor(Math.random() * weighted.length)];
+
+    return interactionOrMessage.reply(`🎉 **Giveaway Winner:** <@${winner}>`);
+}
+
 // ====== REGISTER SLASH COMMAND ======
 const commands = [
     new SlashCommandBuilder()
         .setName('whojoined')
-        .setDescription('Show raid participation buttons')
+        .setDescription('Show raid participation buttons'),
+
+    new SlashCommandBuilder()
+        .setName('whoraided')
+        .setDescription('Show raid participation buttons (RAID MODE, double points)'),
+
+    new SlashCommandBuilder()
+        .setName('giveaway')
+        .setDescription('Start a giveaway (staff only)')
+        .addIntegerOption(opt =>
+            opt.setName('minutes')
+                .setDescription('How long should the giveaway last?')
+                .setRequired(true)
+        )
 ].map(cmd => cmd.toJSON());
 
 // ====== LOGIN ======
 client.login(BOT_TOKEN).then(async () => {
-    // Register slash commands AFTER login
     const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
 
     await rest.put(
@@ -87,97 +141,148 @@ const row = new ActionRowBuilder().addComponents(
 
 // ====== INTERACTIONS ======
 client.on('interactionCreate', async interaction => {
-    // Slash command
+    // Slash commands
     if (interaction.isChatInputCommand()) {
+        const STAFF_ROLE = "1528361487268319232";
+        const allowedRoleId = "1515606449332424749";
+        const cooldownTime = 3 * 60 * 1000;
+        const logChannelId = "1528652282252496926";
+
+        // /giveaway
+        if (interaction.commandName === 'giveaway') {
+            if (!interaction.member.roles.cache.has(STAFF_ROLE)) {
+                return interaction.reply({
+                    content: "Only staff can start giveaways.",
+                    ephemeral: true
+                });
+            }
+
+            const minutes = interaction.options.getInteger('minutes');
+
+            client.giveaway.active = true;
+            client.giveaway.entries = {};
+            client.giveaway.timeout = setTimeout(() => {
+                endGiveaway(interaction);
+            }, minutes * 60000);
+
+            return interaction.reply(`🎉 Giveaway started for **${minutes} minutes**!`);
+        }
+
+        // /whoraided
+        if (interaction.commandName === 'whoraided') {
+            if (!interaction.member.roles.cache.has(allowedRoleId)) {
+                const logChannel = interaction.guild.channels.cache.get(logChannelId);
+                if (logChannel) {
+                    logChannel.send(`❌ <@${interaction.user.id}> tried to use /whoraided but lacks the required role.`);
+                }
+
+                return interaction.reply({
+                    content: "You don't have permission to use this command.",
+                    ephemeral: true
+                });
+            }
+
+            const now = Date.now();
+            if (now - whoJoinedCooldown < cooldownTime) {
+                const remaining = Math.ceil((cooldownTime - (now - whoJoinedCooldown)) / 1000);
+
+                const logChannel = interaction.guild.channels.cache.get(logChannelId);
+                if (logChannel) {
+                    logChannel.send(`⏳ <@${interaction.user.id}> tried to use /whoraided but cooldown is active (${remaining}s left).`);
+                }
+
+                return interaction.reply({
+                    content: `Slowmode active. You can use this command again in **${remaining} seconds**.`,
+                    ephemeral: true
+                });
+            }
+
+            whoJoinedCooldown = now;
+
+            const logChannel = interaction.guild.channels.cache.get(logChannelId);
+            if (logChannel) {
+                logChannel.send(`🔥 <@${interaction.user.id}> used /whoraided (RAID MODE).`);
+            }
+
+            const msg = await interaction.reply({
+                content: '**Who joined the raid:**\nChoose your role (one choice only):',
+                components: [row],
+                ephemeral: false
+            });
+
+            claimedByMessage.set(msg.id, { set: new Set(), called: false, callerName: null });
+
+            setTimeout(() => {
+                msg.delete().catch(() => {});
+            }, 10 * 60 * 1000);
+
+            return;
+        }
+
+        // /whojoined
         if (interaction.commandName === 'whojoined') {
-// ====== ROLE + SERVER-WIDE COOLDOWN ======
-const allowedRoleId = "1515606449332424749"; // replace with your real role ID
-const cooldownTime = 3 * 60 * 1000; // 3 minutes
+            if (!interaction.member.roles.cache.has(allowedRoleId)) {
+                const logChannel = interaction.guild.channels.cache.get(logChannelId);
+                if (logChannel) {
+                    logChannel.send(`❌ <@${interaction.user.id}> tried to use /whojoined but lacks the required role.`);
+                }
 
-// Logging channel (optional)
-const logChannelId = "1528652282252496926"; // replace with your logging channel ID
+                return interaction.reply({
+                    content: "You don't have permission to use this command.",
+                    ephemeral: true
+                });
+            }
 
-// ROLE CHECK
-if (!interaction.member.roles.cache.has(allowedRoleId)) {
-    // Log unauthorized attempt
-    const logChannel = interaction.guild.channels.cache.get(logChannelId);
-    if (logChannel) {
-        logChannel.send(`❌ <@${interaction.user.id}> tried to use /whojoined but lacks the required role.`);
+            const now = Date.now();
+            if (now - whoJoinedCooldown < cooldownTime) {
+                const remaining = Math.ceil((cooldownTime - (now - whoJoinedCooldown)) / 1000);
+
+                const logChannel = interaction.guild.channels.cache.get(logChannelId);
+                if (logChannel) {
+                    logChannel.send(`⏳ <@${interaction.user.id}> tried to use /whojoined but cooldown is active (${remaining}s left).`);
+                }
+
+                return interaction.reply({
+                    content: `Slowmode active. You can use this command again in **${remaining} seconds**.`,
+                    ephemeral: true
+                });
+            }
+
+            whoJoinedCooldown = now;
+
+            const logChannel = interaction.guild.channels.cache.get(logChannelId);
+            if (logChannel) {
+                logChannel.send(`✅ <@${interaction.user.id}> used /whojoined successfully.`);
+            }
+
+            const msg = await interaction.reply({
+                content: '**Raid Participation:**\nChoose your role (one choice only):',
+                components: [row],
+                ephemeral: false
+            });
+
+            claimedByMessage.set(msg.id, { set: new Set(), called: false, callerName: null });
+
+            setTimeout(() => {
+                msg.delete().catch(() => {});
+            }, 10 * 60 * 1000);
+
+            return;
+        }
     }
-
-    return interaction.reply({
-        content: "You don't have permission to use this command.",
-        ephemeral: true
-    });
-}
-
-// SERVER-WIDE COOLDOWN CHECK
-const now = Date.now();
-if (now - whoJoinedCooldown < cooldownTime) {
-    const remaining = Math.ceil((cooldownTime - (now - whoJoinedCooldown)) / 1000);
-
-    // Log cooldown block
-    const logChannel = interaction.guild.channels.cache.get(logChannelId);
-    if (logChannel) {
-        logChannel.send(`⏳ <@${interaction.user.id}> tried to use /whojoined but cooldown is active (${remaining}s left).`);
-    }
-
-    return interaction.reply({
-        content: `Slowmode active. You can use this command again in **${remaining} seconds**.`,
-        ephemeral: true
-    });
-}
-
-// SET NEW SERVER-WIDE COOLDOWN
-whoJoinedCooldown = now;
-
-// Log successful use
-const logChannel = interaction.guild.channels.cache.get(logChannelId);
-if (logChannel) {
-    logChannel.send(`✅ <@${interaction.user.id}> used /whojoined successfully.`);
-}
-const msg = await interaction.reply({
-    content: '**Raid Participation:**\nChoose your role (one choice only):',
-    components: [row],
-    ephemeral: false
-});
-
-// Track button claims for this message
-claimedByMessage.set(msg.id, new Set());
-
-// Auto-delete raid message after 10 minutes
-setTimeout(() => {
-    msg.delete().catch(() => {});
-}, 10 * 60 * 1000);
-
-        }   // closes: if (interaction.commandName === 'whojoined')
-    }       // closes: if (interaction.isChatInputCommand())
 
     // Button clicks
     if (interaction.isButton()) {
-
         const msgId = interaction.message.id;
         const userId = interaction.user.id;
 
-        // check if this message is tracked
         if (!claimedByMessage.has(msgId)) {
-            claimedByMessage.set(msgId, new Set());
+            claimedByMessage.set(msgId, { set: new Set(), called: false, callerName: null });
         }
 
-        const claimedSet = claimedByMessage.get(msgId);
-// Initialize per-message "called" flag
-if (claimedSet.called === undefined) {
-    claimedSet.called = false;
-}
-// Track who called for this message
-if (claimedSet.callerName === undefined) {
-    claimedSet.callerName = null;
-}
+        const data = claimedByMessage.get(msgId);
+        const claimedSet = data.set;
 
-
-
-
-        // if user already clicked any button on this message, block
         if (claimedSet.has(userId)) {
             await interaction.reply({
                 content: `You already claimed a role for this raid, <@${userId}>.`,
@@ -190,39 +295,34 @@ if (claimedSet.callerName === undefined) {
         let label = '';
 
         if (interaction.customId === 'joined') {
-            amount = 10;
-            label = 'Joined';
-  } else if (interaction.customId === 'called') {
+            const isRaid = interaction.message.content.includes("Who joined the raid");
+            amount = isRaid ? 20 : 10;
+            label = isRaid ? 'Joined (RAID)' : 'Joined';
+        } else if (interaction.customId === 'called') {
+            if (data.called) {
+                return interaction.reply({
+                    content: `Someone has already claimed **I Called** for this raid.\nCaller: <@${data.callerName}>`,
+                    ephemeral: true
+                });
+            }
 
-    // ====== ONLY ONE PERSON CAN CLAIM "I CALLED" PER MESSAGE ======
-    if (claimedSet.called) {
-        return interaction.reply({
-            content: `Someone has already claimed **I Called** for this raid.\nCaller: <@${claimedSet.callerName}>`,
-            ephemeral: true
-        });
-    }
+            data.called = true;
+            data.callerName = userId;
 
-    // Mark "I Called" as claimed for THIS message only
-    claimedSet.called = true;
-    claimedSet.callerName = userId;
+            const isRaid = interaction.message.content.includes("Who joined the raid");
+            amount = isRaid ? 30 : 15;
+            label = isRaid ? 'Called (RAID)' : 'Called';
 
-    amount = 15;
-    label = 'Called';
+            const originalMessage = interaction.message;
 
-    // ====== EDIT ORIGINAL MESSAGE TO SHOW CALLER ======
-    const originalMessage = interaction.message;
+            await originalMessage.edit({
+                content: `**Raid Participation:**\nChoose your role (one choice only):\n\n📣 **Caller:** <@${userId}>`,
+                components: [row]
+            });
+        }
 
-    await originalMessage.edit({
-        content: `**Raid Participation:**\nChoose your role (one choice only):\n\n📣 **Caller:** <@${userId}>`,
-        components: [row]
-    });
-}
-
-
-        // mark user as claimed for this message
         claimedSet.add(userId);
 
-        // add points
         addPoints(userId, amount);
 
         await interaction.reply({
@@ -240,16 +340,16 @@ client.on('messageCreate', async message => {
     const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
     const cmd = args.shift()?.toLowerCase();
 
-    // !balance or !currency
+    // !balance / !currency / !wallet
     if (cmd === 'balance' || cmd === 'currency' || cmd === 'wallet') {
         const userId = message.author.id;
         const bal = getPoints(userId);
         await message.reply(`Your balance: **${bal} points**`);
+        return;
     }
 
-    // !leaderboard
+    // !leaderboard / !lb
     if (cmd === 'leaderboard' || cmd === 'lb') {
-        // sort points
         const entries = Object.entries(points)
             .sort((a, b) => b[1].balance - a[1].balance)
             .slice(0, 10);
@@ -267,9 +367,10 @@ client.on('messageCreate', async message => {
         }
 
         await message.reply(text);
+        return;
     }
 
-    // manual admin give: !give @user 15
+    // !give @user amount
     if (cmd === 'give') {
         if (!message.member.permissions.has('Administrator')) {
             await message.reply('You must be an admin to use this command.');
@@ -286,6 +387,27 @@ client.on('messageCreate', async message => {
 
         addPoints(target.id, amount);
         await message.reply(`Gave **${amount} points** to <@${target.id}>. New balance: **${getPoints(target.id)}**`);
+        return;
+    }
+
+    // !remove @user amount
+    if (cmd === 'remove') {
+        if (!message.member.permissions.has('Administrator')) {
+            await message.reply('You must be an admin to use this command.');
+            return;
+        }
+
+        const target = message.mentions.users.first();
+        const amount = parseInt(args[0], 10);
+
+        if (!target || isNaN(amount)) {
+            await message.reply('Usage: `!remove @user amount`');
+            return;
+        }
+
+        removePoints(target.id, amount);
+        await message.reply(`Removed **${amount} points** from <@${target.id}>. New balance: **${getPoints(target.id)}**`);
+        return;
     }
 });
 
@@ -298,21 +420,21 @@ function resetWeeklyPoints() {
     console.log("Weekly points reset.");
 }
 
-// Run every 24 hours
 setInterval(() => {
     const now = new Date();
-    const isSunday = now.getDay() === 0; // Sunday = 0
+    const isSunday = now.getDay() === 0;
     const isMidnight = now.getHours() === 0 && now.getMinutes() === 0;
 
     if (isSunday && isMidnight) {
         resetWeeklyPoints();
     }
-}, 60 * 1000); // check every minute
+}, 60 * 1000);
+
 // ====== SHOP ======
 const shopItems = {
-    "role1": { cost: 50, description: "Special Raid Role" },
-    "role2": { cost: 100, description: "Elite Raider Role" },
-    "boost": { cost: 25, description: "Temporary XP Boost" }
+    "entry1": { cost: 200, description: "1 extra giveaway entry" },
+    "entry2": { cost: 400, description: "2 extra giveaway entries" },
+    "instantwin": { cost: 800, description: "Instant giveaway win (only during active giveaway)" }
 };
 
 client.on('messageCreate', async message => {
@@ -329,7 +451,8 @@ client.on('messageCreate', async message => {
             const { cost, description } = shopItems[item];
             text += `\n**${item}** — ${cost} points\n*${description}*`;
         }
-        return message.reply(text);
+        await message.reply(text);
+        return;
     }
 
     // !buy itemName
@@ -346,16 +469,33 @@ client.on('messageCreate', async message => {
             return message.reply(`You need **${item.cost} points** to buy **${itemName}**.`);
         }
 
-        // Deduct points
         points[userId].balance -= item.cost;
         savePoints();
 
-        return message.reply(`You bought **${itemName}** for **${item.cost} points**!`);
+        if (itemName === "entry1") {
+            client.giveaway.entries[userId] = (client.giveaway.entries[userId] || 0) + 1;
+            return message.reply("You purchased **1 extra giveaway entry**!");
+        }
+
+        if (itemName === "entry2") {
+            client.giveaway.entries[userId] = (client.giveaway.entries[userId] || 0) + 2;
+            return message.reply("You purchased **2 extra giveaway entries**!");
+        }
+
+        if (itemName === "instantwin") {
+            if (!client.giveaway.active) {
+                return message.reply("Instant win can only be bought during an active giveaway.");
+            }
+
+            client.giveaway.entries[userId] = 999999;
+            endGiveaway(message);
+
+            return message.reply("You **instantly win** the giveaway!");
+        }
     }
 });
-// ====== DASHBOARD ======
-const http = require('http');
 
+// ====== DASHBOARD ======
 http.createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "text/html" });
 
@@ -376,6 +516,7 @@ http.createServer((req, res) => {
 }).listen(3000, () => {
     console.log("Dashboard running at http://localhost:3000");
 });
+
 // ====== DAILY REWARD ======
 const dailyRewardAmount = 20;
 const dailyClaimsFile = './dailyClaims.json';
@@ -408,7 +549,6 @@ client.on('messageCreate', async message => {
             return message.reply(`You already claimed your daily reward. Come back in **${hoursLeft} hours**.`);
         }
 
-        // Give reward
         addPoints(userId, dailyRewardAmount);
         dailyClaims[userId] = now;
         saveDailyClaims();
