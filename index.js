@@ -7,7 +7,8 @@ const {
     REST,
     ActionRowBuilder,
     ButtonBuilder,
-    ButtonStyle
+    ButtonStyle,
+    EmbedBuilder
 } = require('discord.js');
 const fs = require('fs');
 const http = require('http');
