@@ -520,6 +520,7 @@ if (interaction.isButton()) {
         ephemeral: true
     });
 }
+});
 
 
 
