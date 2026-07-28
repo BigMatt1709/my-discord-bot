@@ -536,7 +536,7 @@ client.on('messageCreate', async message => {
 
     // ⭐ NEW BALANCE BLOCK GOES HERE ⭐
     if (cmd === 'balance' || cmd === 'currency' || cmd === 'wallet') {
-        const STAFF_ROLE = "1529267990074363984";
+        const STAFF_ROLE = "1515606449332424749";
 
         let target = message.mentions.users.first();
 
